@@ -1204,6 +1204,19 @@ class AsyncLLM(EngineClient):
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
+    async def kv_snapshot_control(
+        self,
+        rank: int,
+        operation: str,
+        namespace: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self.engine_core.kv_snapshot_control_async(
+            rank, operation, namespace, lease_id, after, identity
+        )
+
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:

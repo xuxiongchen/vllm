@@ -19,6 +19,17 @@ def register_api_routers(
 
     register_vllm_serve_api_routers(app)
 
+    if "generate" in supported_tasks and getattr(
+        args, "kv_snapshot_control_key_file", None
+    ):
+        from vllm.entrypoints.serve.kv_snapshot.api_router import attach_router
+
+        attach_router(
+            app,
+            args.kv_snapshot_control_key_file,
+            [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key],
+        )
+
     from vllm.entrypoints.openai.models.api_router import (
         attach_router as register_models_api_router,
     )

@@ -301,6 +301,17 @@ class EngineCoreClient(ABC):
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
+    async def kv_snapshot_control_async(
+        self,
+        rank: int,
+        operation: str,
+        namespace: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {"status": "unsupported", "reason": "client_has_no_capability"}
+
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
@@ -967,7 +978,14 @@ def _process_utility_output(
     output: UtilityOutput, utility_results: dict[int, AnyFuture]
 ):
     """Set the result from a utility method in the waiting future."""
-    future = utility_results.pop(output.call_id)
+    # Cancelled snapshot controls remove their negative call-id entry; a late
+    # reply must not stop the shared reader or affect ordinary utility calls.
+    if output.call_id <= -3:
+        future = utility_results.pop(output.call_id, None)
+        if future is None:
+            return
+    else:
+        future = utility_results.pop(output.call_id)
     failure_message = output.failure_message
     try:
         if failure_message is not None:
@@ -1355,18 +1373,59 @@ class AsyncMPClient(MPClient):
         return results[0]
 
     async def _call_utility_async(
-        self, method: str, *args, engine: EngineIdentity
+        self,
+        method: str,
+        *args,
+        engine: EngineIdentity,
+        _snapshot_control: bool = False,
     ) -> Any:
-        call_id = uuid.uuid1().int >> 64
+        call_id = (
+            -(uuid.uuid4().int % (2**63 - 2)) - 3
+            if _snapshot_control
+            else uuid.uuid1().int >> 64
+        )
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        message = (
-            EngineCoreRequestType.UTILITY.value,
-            *self.encoder.encode((self.client_index, call_id, method, args)),
+        try:
+            message = (
+                EngineCoreRequestType.UTILITY.value,
+                *self.encoder.encode((self.client_index, call_id, method, args)),
+            )
+            await self._send_input_message(message, engine)
+            self._ensure_output_queue_task()
+            return await future
+        finally:
+            if _snapshot_control and self.utility_results.get(call_id) is future:
+                self.utility_results.pop(call_id)
+                future.cancel()
+
+    async def kv_snapshot_control_async(
+        self,
+        rank: int,
+        operation: str,
+        namespace: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Retention sessions must have one explicit global engine owner.
+        if len(self.engine_ranks_managed) != 1:
+            return {"status": "unsupported", "reason": "ambiguous_http_engine"}
+        if rank not in self.engine_ranks_managed or not 0 <= rank <= 65535:
+            return {"status": "invalid", "reason": "rank_not_managed"}
+        if len(self.utility_results) >= 64:
+            return {"status": "capacity", "reason": "control_requests_full"}
+        return await self._call_utility_async(
+            "kv_snapshot_control",
+            operation,
+            lease_id,
+            after,
+            rank,
+            namespace,
+            identity,
+            engine=rank.to_bytes(2, "little"),
+            _snapshot_control=True,
         )
-        await self._send_input_message(message, engine)
-        self._ensure_output_queue_task()
-        return await future
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")

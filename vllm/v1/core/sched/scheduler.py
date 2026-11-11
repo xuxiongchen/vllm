@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
+import uuid
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -18,6 +19,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_snapshot import KvSnapshotCatalogue, SnapshotError
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -57,6 +59,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -367,6 +370,33 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
+        self.kv_snapshot_catalogue = None
+        if (
+            self.kv_events_config
+            and self.kv_events_config.snapshot_namespace is not None
+        ):
+            self.kv_snapshot_catalogue = KvSnapshotCatalogue(
+                self.kv_cache_manager.block_pool,
+                namespace=self.kv_events_config.snapshot_namespace,
+                source_id=uuid.uuid4().hex,
+                rank=self.parallel_config.data_parallel_index,
+                block_size=block_size,
+            )
+            groups = kv_cache_config.kv_cache_groups
+            if (
+                not self.cache_config.enable_prefix_caching
+                or len(groups) != 1
+                or type(groups[0].kv_cache_spec) is not FullAttentionSpec
+                or groups[0].kv_cache_spec.sliding_window is not None
+                or groups[0].kv_cache_spec.block_size != self.block_size
+                or self.num_lookahead_tokens != 0
+                or self.num_prefill_lookahead != 0
+                or self.num_hash_lookahead_tokens != 0
+                or self.hash_block_size != self.block_size
+                or self.dcp_world_size != 1
+                or self.pcp_world_size != 1
+            ):
+                self.kv_snapshot_catalogue.unavailable("unsupported_scheduler_profile")
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -2630,22 +2660,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self._publish_kv_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -3426,6 +3441,65 @@ class Scheduler(SchedulerInterface):
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
         return self.kv_event_publisher.get_publisher_config()
+
+    def _publish_kv_events(self) -> None:
+        events = self.kv_cache_manager.take_events()
+        if self.kv_snapshot_catalogue is not None:
+            self.kv_snapshot_catalogue.publish(events, self.requests.values())
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+        if events:
+            self.kv_event_publisher.publish(KVEventBatch(ts=time.time(), events=events))
+
+    def kv_snapshot_control(
+        self,
+        operation: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        rank: int | None = None,
+        namespace: str | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run on EngineCore's serialized utility path, never a publisher thread."""
+        catalogue = self.kv_snapshot_catalogue
+        if catalogue is None:
+            return {"status": "unsupported", "reason": "capability_disabled"}
+        try:
+            if rank is not None and rank != catalogue.identity["rank"]:
+                raise SnapshotError("invalid", "rank_mismatch")
+            if namespace is not None and namespace != catalogue.identity["namespace"]:
+                raise SnapshotError("invalid", "namespace_mismatch")
+            if identity is not None and identity != catalogue.identity:
+                raise SnapshotError("invalid", "identity_changed")
+            # Normal publication owns the only drain; the cut cannot steal events.
+            self._publish_kv_events()
+            if operation == "capabilities":
+                return catalogue.capabilities()
+            if operation == "open":
+                return catalogue.open_snapshot(lease_id)
+            if operation == "restart_stream":
+                return catalogue.restart_stream()
+            if lease_id is None:
+                raise SnapshotError("invalid", "missing_lease")
+            if operation == "catch_up":
+                return catalogue.catch_up(lease_id)
+            if operation == "live" and after is not None:
+                return catalogue.live(lease_id, after)
+            if operation == "release":
+                catalogue.release(lease_id)
+                return {
+                    "status": "complete",
+                    "identity": catalogue.identity.copy(),
+                    "lease_id": lease_id,
+                }
+            raise SnapshotError("invalid", "unknown_operation")
+        except SnapshotError as error:
+            return {"status": error.status, "reason": error.reason}
 
     def _connector_finished(
         self, request: Request

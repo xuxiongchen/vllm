@@ -49,6 +49,16 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    snapshot_namespace: str | None = None
+    """Opt in to the candidate owner-loop metadata snapshot capability.
+    The explicit deployment namespace must bind the model/input/hash contract.
+    This does not extend or change the legacy ZMQ event wire protocol.
+    """
+
     def __post_init__(self):
+        if self.snapshot_namespace is not None and (
+            not self.snapshot_namespace or not self.enable_kv_cache_events
+        ):
+            raise ValueError("snapshot_namespace requires a name and KV cache events")
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

@@ -596,6 +596,8 @@ class EventPublisherFactory:
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
+        # Snapshot state belongs to the cache owner, not the legacy transport.
+        config_dict.pop("snapshot_namespace")
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
