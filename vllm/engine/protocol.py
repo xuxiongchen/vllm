@@ -172,6 +172,18 @@ class EngineClient(ABC):
         """Reset the encoder cache"""
         ...
 
+    async def kv_snapshot_control(
+        self,
+        rank: int,
+        operation: str,
+        namespace: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Optional worker-local metadata capability, disabled by default."""
+        return {"status": "unsupported", "reason": "client_has_no_capability"}
+
     @abstractmethod
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

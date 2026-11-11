@@ -796,6 +796,20 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def kv_snapshot_control(
+        self,
+        operation: str,
+        lease_id: str | None = None,
+        after: int | None = None,
+        rank: int | None = None,
+        namespace: str | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        control = getattr(self.scheduler, "kv_snapshot_control", None)
+        if control is None:
+            return {"status": "unsupported", "reason": "scheduler_has_no_capability"}
+        return control(operation, lease_id, after, rank, namespace, identity)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

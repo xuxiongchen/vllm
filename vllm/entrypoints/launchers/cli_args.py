@@ -305,6 +305,10 @@ class FrontendArgs(BaseFrontendArgs):
     see
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
     for what it does and does not protect."""
+    kv_snapshot_control_key_file: str | None = None
+    """Opt in to protected KV snapshot metadata control using a dedicated key
+    file. The file must contain a service-only credential distinct from the
+    inference API key. Keep this metadata endpoint on a trusted network."""
     ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
     ssl_certfile: str | None = None
