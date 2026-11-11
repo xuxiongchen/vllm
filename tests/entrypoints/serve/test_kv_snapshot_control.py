@@ -21,6 +21,33 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.mark.parametrize(
+    ("raw", "valid"),
+    [
+        (b"service-test-secret", True),
+        (b"service-test-secret\n", True),
+        (b"service-test-secret\r\n", True),
+        (b" service-test-secret", False),
+        (b"service-test-secret ", False),
+        (b"service\ttest-secret", False),
+        (b"service-test-secret\n\n", False),
+        (b"service-test-secret\r", False),
+        (b"service-test-secr\xc3\xa9t", False),
+        (b"", False),
+    ],
+)
+def test_control_key_file_has_unambiguous_visible_ascii(tmp_path, raw, valid):
+    key = tmp_path / "control-key"
+    key.write_bytes(raw)
+    app = FastAPI()
+    if valid:
+        attach_router(app, str(key), ["inference-test-secret"])
+        assert any(route.path == "/v1/kv_snapshot" for route in app.routes)
+    else:
+        with pytest.raises(ValueError, match="credential"):
+            attach_router(app, str(key), ["inference-test-secret"])
+
+
 @pytest.mark.anyio
 async def test_control_authentication_and_bounds_precede_engine_side_effects(tmp_path):
     key = tmp_path / "control-key"

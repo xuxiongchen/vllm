@@ -39,8 +39,14 @@ def attach_router(app: FastAPI, key_file: str, api_keys: list[str] | None) -> No
         raw_key = stream.read(MAX_REQUEST_BYTES + 1)
     if len(raw_key) > MAX_REQUEST_BYTES:
         raise ValueError("snapshot control credential file is too large")
-    key = raw_key.decode().rstrip("\r\n")
-    if not key or key in (api_keys or []):
+    if raw_key.endswith(b"\r\n"):
+        raw_key = raw_key[:-2]
+    elif raw_key.endswith(b"\n"):
+        raw_key = raw_key[:-1]
+    if not raw_key or any(byte < 0x21 or byte > 0x7E for byte in raw_key):
+        raise ValueError("snapshot control credential must be visible ASCII")
+    key = raw_key.decode("ascii")
+    if key in (api_keys or []):
         raise ValueError("snapshot control requires a distinct service credential")
     auth = AuthenticationMiddleware(app, [key])
     permits = asyncio.Semaphore(2)

@@ -479,11 +479,15 @@ class KvSnapshotCatalogue:
             raise SnapshotError("invalid", "owner_events_not_flushed")
         if session.high is None:
             session.high = self._next_seq - 1
-        reply = self._range(session.watermark, session.high)
-        session.delivered = max(session.delivered, session.high)
-        return self._bounded_reply(
-            {**reply, "lease_id": lease, "lease_seconds": self.limits.lease_seconds}
+        reply = self._bounded_reply(
+            {
+                **self._range(session.watermark, session.high),
+                "lease_id": lease,
+                "lease_seconds": self.limits.lease_seconds,
+            }
         )
+        session.delivered = max(session.delivered, session.high)
+        return reply
 
     def _range(self, after: int, high: int) -> dict[str, Any]:
         retained = self._journal[0][0] if self._journal else self._next_seq

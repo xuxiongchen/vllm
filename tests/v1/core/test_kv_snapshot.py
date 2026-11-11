@@ -84,6 +84,35 @@ def test_live_ack_renews_finite_lease_and_releases_old_retention():
     assert not catalogue._sessions
 
 
+@pytest.mark.parametrize("max_bytes", [1200, 8192])
+def test_catch_up_only_marks_a_bounded_reply_delivered(max_bytes):
+    pool, catalogue = make_pool(
+        limits=replace(SnapshotLimits(), max_snapshot_bytes=max_bytes)
+    )
+    snapshot = catalogue.open_snapshot()
+    lease = snapshot["lease_id"]
+    session = catalogue._sessions[lease]
+    assert (session.delivered, session.acknowledged) == (-1, -1)
+    store(pool)
+    flush(pool, catalogue)
+    if max_bytes == 1200:
+        with pytest.raises(SnapshotError, match="snapshot_bytes_full"):
+            catalogue.catch_up(lease)
+        assert session.high == 0  # The finite cut may remain fixed after refusal.
+        assert (session.delivered, session.acknowledged) == (-1, -1)
+        with pytest.raises(SnapshotError, match="invalid_live_cursor"):
+            catalogue.live(lease, 0)
+        assert (session.delivered, session.acknowledged) == (-1, -1)
+    else:
+        reply = catalogue.catch_up(lease)
+        assert [frame["seq"] for frame in reply["replay"]] == [0]
+        assert (session.delivered, session.acknowledged) == (0, -1)
+        assert catalogue.live(lease, 0)["replay"] == []
+        assert (session.delivered, session.acknowledged) == (0, 0)
+    catalogue.release(lease)
+    assert not catalogue._sessions
+
+
 @pytest.mark.parametrize("failure", ["forward", "regression", "expired", "restart"])
 def test_live_ack_rejects_unproven_or_old_session(failure):
     now = [0.0]
